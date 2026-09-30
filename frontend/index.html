@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HR Client</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">HR CLIENT / MVP</p>
+          <h1>Поиск, матчинг и контролируемые отклики</h1>
+        </div>
+        <button id="import-button" type="button">Обновить вакансии</button>
+      </header>
+
+      <section class="filter" aria-label="Фильтр вакансий по дате">
+        <label>Дата от<input id="date-from" type="date" required /></label>
+        <label>Дата до<input id="date-to" type="date" required /></label>
+        <span id="import-status">Диапазон отправляется в HH и Telegram</span>
+      </section>
+
+      <section class="metrics" aria-label="Аналитика откликов">
+        <article><small>Отправлено</small><strong id="sent">—</strong></article>
+        <article><small>Просмотрено</small><strong id="viewed">—</strong></article>
+        <article><small>Приглашения</small><strong id="invited">—</strong></article>
+        <article><small>Отказы</small><strong id="rejected">—</strong></article>
+      </section>
+
+      <section>
+        <h2>Вакансии</h2>
+        <p id="vacancies-status">Загрузка…</p>
+        <div id="vacancies" class="vacancies"></div>
+      </section>
+
+      <section class="todo">
+        <h2>Следующие экраны</h2>
+        <p>Резюме · Профили матчинга · Черновики откликов с approve/send · Воронка и экспорт CSV/XLSX.</p>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
