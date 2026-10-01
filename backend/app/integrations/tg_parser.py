@@ -160,7 +160,6 @@ class TgParser:
             })
         return result
 
-# ---------------- Пример использования ----------------
 async def main():
 
 
