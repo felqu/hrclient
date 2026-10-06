@@ -12,10 +12,12 @@ from telethon.errors import FloodWaitError
 load_dotenv()
 
 class PrivateTgParser:
-    def __init__(self):
-        self.api_id = os.getenv('TG_API_ID')
-        self.api_hash = os.getenv('TG_API_HASH')
-        self.phone = os.getenv('TG_PHONE_NUM')
+    def __init__(self, session_name: str = "tg_parser", *, api_id=None, api_hash=None, phone=None):
+        self.api_id = api_id or os.getenv('TG_API_ID')
+        self.api_hash = api_hash or os.getenv('TG_API_HASH')
+        self.phone = phone or os.getenv('TG_PHONE_NUM')
+        self.session_name = session_name
+        self.client = None
 
     async def __aenter__(self):
         """Позволяет использовать класс через async with."""
@@ -27,8 +29,12 @@ class PrivateTgParser:
 
     async def connect(self, phone: Optional[str] = None):
         """Подключение к Telegram и авторизация."""
-        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
-        await self.client.start(phone=phone)
+        if self.client and self.client.is_connected():
+            return
+        if not self.api_id or not self.api_hash:
+            raise RuntimeError("Не заданы TG_API_ID и TG_API_HASH (env или аргументы конструктора).")
+        self.client = TelegramClient(self.session_name, int(self.api_id), self.api_hash)
+        await self.client.start(phone=phone or self.phone)
 
     async def disconnect(self):
         """Отключение от Telegram."""
