@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Парсинг вакансий — HR Client</title>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      .parse-form {
+        display: grid;
+        gap: 16px;
+        margin-top: 32px;
+        padding: 20px;
+        background: #fff;
+        border-radius: 14px;
+      }
+      .parse-form .row {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+      .parse-form label {
+        display: grid;
+        gap: 7px;
+        font-weight: 600;
+      }
+      .parse-form label.wide {
+        grid-column: 1 / -1;
+      }
+      .parse-form textarea,
+      .parse-form select {
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+        border: 1px solid #d5d9e2;
+        background: #fff;
+      }
+      .parse-form textarea {
+        min-height: 84px;
+        resize: vertical;
+      }
+      .parse-form .hint {
+        color: #637083;
+        font-size: 0.85rem;
+        font-weight: 400;
+      }
+      .parse-actions {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+      }
+      .parse-actions span {
+        color: #637083;
+      }
+      .parse-actions span.error {
+        color: #dc2626;
+      }
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        margin-right: 6px;
+        border: 2px solid rgba(79, 70, 229, 0.3);
+        border-top-color: #4f46e5;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: -1px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .vacancies .salary {
+        color: #059669;
+        font-weight: 700;
+      }
+      .vacancies .tags {
+        margin-top: 8px;
+      }
+      .vacancies details {
+        margin-top: 8px;
+      }
+      .vacancies summary {
+        color: #637083;
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
+      .vacancies pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #f5f7fb;
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 0.8rem;
+      }
+      .back-link {
+        color: #4f46e5;
+        font-weight: 600;
+        text-decoration: none;
+      }
+      header a.back-link:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">HR CLIENT / TELEGRAM PARSER</p>
+          <h1>Парсинг вакансий из Telegram-каналов</h1>
+        </div>
+        <a class="back-link" href="index.html">← К дашборду</a>
+      </header>
+
+      <section aria-label="Настройки парсинга">
+        <form id="parse-form" class="parse-form">
+          <label class="wide">
+            Каналы
+            <textarea
+              id="chats"
+              rows="3"
+              placeholder="telegram&#10;hh_vacancies&#10;@job_channel"
+              required
+            ></textarea>
+            <span class="hint">По одному каналу в строке: username, @name или t.me/...</span>
+          </label>
+
+          <div class="row">
+            <label>
+              Парсер
+              <select id="backend">
+                <option value="tg_parser">tg_parser — публичные каналы (tgscraper)</option>
+                <option value="private_tg_parser">
+                  private_tg_parser — приватные (Telethon, нужен TG_API_ID/TG_API_HASH)
+                </option>
+              </select>
+            </label>
+            <label>Дата от<input id="date-from" type="date" required /></label>
+            <label>Дата до<input id="date-to" type="date" required /></label>
+          </div>
+
+          <div class="row">
+            <label>
+              Слова в тексте
+              <input id="text" type="text" placeholder="необязательно" />
+            </label>
+            <label>
+              Сообщений на канал
+              <input id="max" type="number" min="1" max="10000" value="500" />
+            </label>
+          </div>
+
+          <div class="parse-actions">
+            <button id="run-button" type="submit">Запустить парсинг</button>
+            <span id="parse-status">Заполните каналы и диапазон дат</span>
+          </div>
+        </form>
+      </section>
+
+      <section>
+        <h2>Найденные вакансии</h2>
+        <p id="vacancies-status">Пока не запускали парсинг</p>
+        <div id="vacancies" class="vacancies"></div>
+      </section>
+    </main>
+    <script src="parse.js"></script>
+  </body>
+</html>
