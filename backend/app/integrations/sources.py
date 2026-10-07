@@ -11,14 +11,11 @@ from typing import Any, Literal, Protocol
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
+from ..llm_client.llm_client import LLMClient
 
 from .models.tg_models import (
-    EmploymentType,
-    ExperienceLevel,
     JobVacancy,
     Salary,
-    SourceInfo,
-    WorkFormat,
 )
 
 load_dotenv()
@@ -28,10 +25,6 @@ BackendName = Literal["tg_parser", "private_tg_parser"]
 DEFAULT_VACANCY_KEYWORDS = (r"(ваканси\w*|hiring|ищем|требуется|job\s*offer|vacancy|Формат|Работы|Откликнуться|разработчик"
                             r"|Engineer|Отклик|Ищу|Контакт|Условия|)")
 
-
-# --------------------------------------------------------------------------
-# Бэкенды: способ получения сообщений из Telegram
-# --------------------------------------------------------------------------
 
 
 class TgMessageBackend(Protocol):
@@ -82,7 +75,6 @@ class ScraperBackend:
 
 
 class TelethonBackend:
-    """private_tg_parser: приватные/публичные каналы через Telethon (нужен TG_API_ID/TG_API_HASH)."""
 
     name: BackendName = "private_tg_parser"
 
@@ -164,16 +156,7 @@ class HHGateway(SourceGateway):
 
 
 class TelegramGateway(SourceGateway):
-    """
-    Шлюз-источник вакансий из Telegram-каналов.
 
-    :param chats: список каналов (username, @name, t.me/..., id)
-    :param backend: 'tg_parser' (публичные каналы, tgscraper)
-                    или 'private_tg_parser' (Telethon, приватные каналы);
-                    по умолчанию берётся из env TG_BACKEND
-    :param max_per_channel: сколько сообщений максимум тянуть с канала
-    :param vacancy_keywords: regex-паттерн «это вакансия»
-    """
 
     def __init__(
         self,
@@ -199,6 +182,8 @@ class TelegramGateway(SourceGateway):
         )
         self._opened = False
         self._in_context = False
+        self.llm_client = LLMClient(os.getenv("ZAI_MODEL"),provider="zai")
+
 
     # --- контекстный менеджер (удобно для тестов и скриптов) ---
     async def __aenter__(self) -> TelegramGateway:
@@ -300,26 +285,8 @@ class TelegramGateway(SourceGateway):
         channel_url = _channel_url(channel)
 
         # Формируем итоговую зарплату из структурированных данных
-        salary_str = self._format_salary(llm_data.salary_min, llm_data.salary_max, llm_data.salary_currency)
 
-        return JobVacancy(
-            title=llm_data.title or "Вакансия",
-            source=SourceInfo(
-                channel_name=str(channel),
-                channel_url=channel_url,
-                original_url=_message_url(msg, msg_id, channel_url),
-                message_id=str(msg_id) if msg_id is not None else None,
-            ),
-            work_format=llm_data.work_format,
-            employment_type=llm_data.employment_type,
-            experience_level=llm_data.experience_level,
-            location=llm_data.location,
-            company=llm_data.company,
-            salary=salary_str,
-            raw_text=text,
-            published_date=posted.date(),
-            is_active=True,
-        )
+        return llm_data
 
     # ------------------- LLM интеграция -------------------
 
