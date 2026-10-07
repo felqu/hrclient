@@ -24,6 +24,7 @@ class ExperienceLevel(str, Enum):
     SENIOR = "senior"
     LEAD = "lead"
     EXECUTIVE = "executive"
+    UNKNOWN = "unknown"
 
 class EducationLevel(str, Enum):
     SECONDARY = "среднее"

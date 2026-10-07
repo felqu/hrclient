@@ -40,7 +40,7 @@ class Salary(BaseModel):
     period: str = Field("month", description="Период (month, year, hour)")
     raw_text: Optional[str] = Field(None, description="Исходный текст зарплаты, если не удалось распарсить")
 
-class Contact(BaseModel):
+class Contacts(BaseModel):
     """Контактная информация для отклика."""
     type: str = Field(..., description="Тип контакта (telegram, email, url)")
     value: str = Field(..., description="Значение контакта")
@@ -84,7 +84,7 @@ class JobVacancy(BaseModel):
     benefits: List[str] = Field(default_factory=list, description="Предлагаемые бонусы и условия")
 
     # 5. Коммуникация
-    contacts: List[Contact] = Field(default_factory=list, description="Контакты для отклика")
+    contacts: List[Contacts] = Field(default_factory=list, description="Контакты для отклика")
 
     # 6. Метаданные
     raw_text: str = Field(..., description="Исходный полный текст сообщения")
