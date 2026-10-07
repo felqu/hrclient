@@ -16,6 +16,7 @@ from ..llm_client.llm_client import LLMClient
 from .models.tg_models import (
     JobVacancy,
     Salary,
+    SourceInfo,
 )
 
 load_dotenv()
@@ -23,7 +24,7 @@ load_dotenv()
 BackendName = Literal["tg_parser", "private_tg_parser"]
 
 DEFAULT_VACANCY_KEYWORDS = (r"(ваканси\w*|hiring|ищем|требуется|job\s*offer|vacancy|Формат|Работы|Откликнуться|разработчик"
-                            r"|Engineer|Отклик|Ищу|Контакт|Условия|)")
+                            r"|Engineer|Отклик|Ищу|Контакт|Условия)")
 
 
 
@@ -182,7 +183,8 @@ class TelegramGateway(SourceGateway):
         )
         self._opened = False
         self._in_context = False
-        self.llm_client = LLMClient(os.getenv("ZAI_MODEL"),provider="zai")
+        self.last_errors: list[str] = []
+        self.llm_client = LLMClient(os.getenv("ZAI_MODEL") or "glm-4.5-flash", provider="zai")
 
 
     # --- контекстный менеджер (удобно для тестов и скриптов) ---
@@ -238,6 +240,7 @@ class TelegramGateway(SourceGateway):
                 )
             except Exception as exc:  # noqa: BLE001 — сбой одного канала не должен ронять импорт
                 print(f"   Ошибка при обработке {chat}: {exc}")
+                self.last_errors.append(f"{chat}: {exc}")
                 continue
 
             for msg in messages:
@@ -284,8 +287,15 @@ class TelegramGateway(SourceGateway):
         msg_id = getattr(msg, "id", None)
         channel_url = _channel_url(channel)
 
-        # Формируем итоговую зарплату из структурированных данных
-
+        llm_data.source = SourceInfo(
+            channel_name=str(channel),
+            channel_url=channel_url,
+            original_url=_message_url(msg, msg_id, channel_url),
+            message_id=str(msg_id) if msg_id is not None else None,
+        )
+        llm_data.raw_text = text
+        if llm_data.published_date is None and posted is not None:
+            llm_data.published_date = posted.date()
         return llm_data
 
     # ------------------- LLM интеграция -------------------
@@ -296,7 +306,8 @@ class TelegramGateway(SourceGateway):
         schema = JobVacancy.model_json_schema()
 
         messages = [
-            {"role": "system", "content": "Тебе дан текст вакансии ответь строго по данной схеме: " + schema},
+            {"role": "system", "content": "Тебе дан текст вакансии ответь строго по данной схеме: "
+                                           + json.dumps(schema, ensure_ascii=False)},
             {"role": "user", "content": f"Текст вакансии:\n{text}"}
         ]
 

@@ -7,6 +7,7 @@ const asDate = (date) => date.toISOString().slice(0, 10);
 
 byId("date-from").value = asDate(sevenDaysAgo);
 byId("date-to").value = asDate(today);
+byId("channels").value = localStorage.getItem("hr_channels") || "";
 
 async function request(path, options) {
   const response = await fetch(`${API_URL}${path}`, options);
@@ -76,17 +77,23 @@ byId("import-button").addEventListener("click", async () => {
   const status = byId("import-status");
   button.disabled = true;
   status.textContent = "Ставим импорт в очередь…";
+  const chats = byId("channels")
+    .value.split(/[\n,;]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  localStorage.setItem("hr_channels", chats.join(", "));
   try {
-    await request("/vacancies/import", {
+    const result = await request("/vacancies/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         date_from: `${byId("date-from").value}T00:00:00Z`,
         date_to: `${byId("date-to").value}T23:59:59Z`,
         sources: ["hh", "telegram"],
+        telegram_chats: chats,
       }),
     });
-    status.textContent = "Импорт поставлен в очередь";
+    status.textContent = result.detail || `Обновлено: найдено ${result.count} вакансий`;
     await loadVacancies();
   } catch (error) {
     showError(status, error);

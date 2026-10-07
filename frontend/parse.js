@@ -154,7 +154,22 @@ byId("parse-form").addEventListener("submit", async (event) => {
       const message = typeof detail === "string" ? detail : JSON.stringify(detail || `HTTP ${response.status}`);
       throw new Error(message);
     }
+    const errors = Array.isArray(data.errors) ? data.errors : [];
+    if (errors.length && !data.count) {
+      vacanciesStatus.textContent = `Не удалось получить данные: ${errors.join("; ")}`;
+      setStatus(status, "Парсинг завершился с ошибками", true, false);
+      return;
+    }
     renderVacancies(data.vacancies);
+    if (errors.length) {
+      setStatus(
+        status,
+        `Готово: найдено ${data.count} вакансий за ${(data.duration_ms / 1000).toFixed(1)} с; сбои: ${errors.join("; ")}`,
+        false,
+        false,
+      );
+      return;
+    }
     setStatus(
       status,
       `Готово: найдено ${data.count} вакансий за ${(data.duration_ms / 1000).toFixed(1)} с`,
