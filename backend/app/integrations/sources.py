@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 from abc import ABC, abstractmethod
@@ -9,6 +10,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Literal, Protocol
 
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from .models.tg_models import (
     EmploymentType,
@@ -23,7 +25,8 @@ load_dotenv()
 
 BackendName = Literal["tg_parser", "private_tg_parser"]
 
-DEFAULT_VACANCY_KEYWORDS = r"(ваканси\w*|hiring|ищем|требуется|job\s*offer|vacancy)"
+DEFAULT_VACANCY_KEYWORDS = (r"(ваканси\w*|hiring|ищем|требуется|job\s*offer|vacancy|Формат|Работы|Откликнуться|разработчик"
+                            r"|Engineer|Отклик|Ищу|Контакт|Условия|)")
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +256,7 @@ class TelegramGateway(SourceGateway):
                 continue
 
             for msg in messages:
-                vacancy = self._parse_vacancy(chat, msg, start, end)
+                vacancy = await self._parse_vacancy(chat, msg, start, end)
                 if vacancy is None:
                     continue
                 source = vacancy.source
@@ -270,12 +273,14 @@ class TelegramGateway(SourceGateway):
 
         return vacancies
 
-    def _parse_vacancy(
-        self, channel: str, msg: Any, start: datetime, end: datetime
+    async def _parse_vacancy(
+            self, channel: str, msg: Any, start: datetime, end: datetime
     ) -> JobVacancy | None:
         text = (getattr(msg, "text", "") or "").strip()
         if not text:
             return None
+
+        # Дешевая проверка регуляркой, чтобы не слать мусор в LLM и экономить токены
         if not self._vacancy_re.search(text):
             return None
 
@@ -285,27 +290,71 @@ class TelegramGateway(SourceGateway):
         if posted is None or (start and posted < start) or (end and posted > end):
             return None
 
+        # --- Вызов LLM для извлечения сущностей ---
+        llm_data = await self._extract_vacancy_with_llm(text)
+        if llm_data is None:
+            #logger.warning(f"LLM не смог распарсить вакансию в канале {channel}, msg_id={getattr(msg, 'id', None)}")
+            return None
+
         msg_id = getattr(msg, "id", None)
         channel_url = _channel_url(channel)
+
+        # Формируем итоговую зарплату из структурированных данных
+        salary_str = self._format_salary(llm_data.salary_min, llm_data.salary_max, llm_data.salary_currency)
+
         return JobVacancy(
-            title=_guess_title(text) or "Вакансия",
+            title=llm_data.title or "Вакансия",
             source=SourceInfo(
                 channel_name=str(channel),
                 channel_url=channel_url,
                 original_url=_message_url(msg, msg_id, channel_url),
                 message_id=str(msg_id) if msg_id is not None else None,
             ),
-            work_format=_detect_work_format(text),
-            employment_type=_detect_employment_type(text),
-            experience_level=_detect_experience_level(text),
-            location=None,  # TODO: извлекать из текста (LLM)
-            company=None,  # TODO: извлекать из текста (LLM)
-            salary=_extract_salary(text),
+            work_format=llm_data.work_format,
+            employment_type=llm_data.employment_type,
+            experience_level=llm_data.experience_level,
+            location=llm_data.location,
+            company=llm_data.company,
+            salary=salary_str,
             raw_text=text,
-            hashtags=_extract_hashtags(msg, text),
             published_date=posted.date(),
             is_active=True,
         )
+
+    # ------------------- LLM интеграция -------------------
+
+    async def _extract_vacancy_with_llm(self, text: str) -> JobVacancy | None:
+        """Отправляет текст в LLM и парсит ответ в Pydantic модель."""
+
+        schema = JobVacancy.model_json_schema()
+
+        messages = [
+            {"role": "system", "content": "Тебе дан текст вакансии ответь строго по данной схеме: " + schema},
+            {"role": "user", "content": f"Текст вакансии:\n{text}"}
+        ]
+
+        # Просим модель ответить строго в JSON (поддерживается OpenAI и многими другими)
+        extra = {"response_format": {"type": "json_object"}}
+
+        try:
+            # Обрезаем текст, если он слишком длинный (защита от контекстного окна)
+            truncated_text = text[:8000]
+            messages[1]["content"] = f"Текст вакансии:\n{truncated_text}"
+
+            raw_response = await self.llm_client.complete(messages, extra=extra)
+
+            # Валидация через Pydantic
+            return JobVacancy.model_validate_json(raw_response)
+
+        except ValidationError as e:
+            #logger.error(f"Pydantic validation error for LLM response: {e}")
+            return None
+        except json.JSONDecodeError:
+            #logger.error("LLM returned invalid JSON")
+            return None
+        except Exception as e:
+            #logger.exception(f"Unexpected error during LLM extraction: {e}")
+            return None
 
 
 # --------------------------------------------------------------------------
@@ -371,99 +420,7 @@ def _message_url(msg: Any, msg_id: Any, channel_url: str | None) -> str | None:
     return None
 
 
-def _detect_work_format(text: str) -> WorkFormat:
-    lowered = text.lower()
-    if "гибрид" in lowered or "hybrid" in lowered:
-        return WorkFormat.HYBRID
-    if any(key in lowered for key in ("удалён", "удален", "remote")):
-        return WorkFormat.REMOTE
-    if any(key in lowered for key in ("офис", "office", "on-site", "onsite")):
-        return WorkFormat.OFFICE
-    return WorkFormat.UNKNOWN
 
-
-def _detect_employment_type(text: str) -> EmploymentType:
-    lowered = text.lower()
-    # порядок важен: «неполный» содержит «полный»
-    if any(key in lowered for key in ("частичн", "part time", "part-time", "неполный")):
-        return EmploymentType.PART_TIME
-    if any(key in lowered for key in ("стажиров", "internship")):
-        return EmploymentType.INTERNSHIP
-    if any(key in lowered for key in ("контракт", "contract")):
-        return EmploymentType.CONTRACT
-    if any(key in lowered for key in ("полная занятость", "full time", "full-time", "полный день")):
-        return EmploymentType.FULL_TIME
-    return EmploymentType.UNKNOWN
-
-
-def _detect_experience_level(text: str) -> ExperienceLevel:
-    lowered = text.lower()
-    if any(key in lowered for key in ("lead", "лид")):
-        return ExperienceLevel.LEAD
-    if any(key in lowered for key in ("senior", "сеньор", "сеньер", "синьор")):
-        return ExperienceLevel.SENIOR
-    if any(key in lowered for key in ("middle", "мидл", "миддл")):
-        return ExperienceLevel.MIDDLE
-    if any(key in lowered for key in ("junior", "джун", "джуниор")):
-        return ExperienceLevel.JUNIOR
-    if any(key in lowered for key in ("intern", "стажёр", "стажер", "интерн")):
-        return ExperienceLevel.INTERN
-    return ExperienceLevel.UNKNOWN
-
-
-_NUM_TOKEN_RE = re.compile(r"\d+(?:[\s\u00a0]\d{3})*")
-_SALARY_MARKER_RE = re.compile(
-    r"(?:з/п|зарплат\w*|оплат\w*|доход)\s*[:\-–—]?\s*(?P<body>.{0,80})", re.IGNORECASE
-)
-_SALARY_CURRENCY_RE = re.compile(
-    r"\d+(?:[\s\u00a0]\d{3})+(?:\s*[-–—]\s*\d+(?:[\s\u00a0]\d{3})+)?\s*(?:₽|руб)", re.IGNORECASE
-)
-_SALARY_UNIT_RE = re.compile(r"тыс\.?|(?<![A-Za-zА-Яа-я])(?:k|к)(?![A-Za-zА-Яа-я])", re.IGNORECASE)
-
-
-def _extract_salary(text: str) -> Salary | None:
-    """Грубая эвристика: «з/п от 100 000 до 150 000 ₽» / «150-200к». Сложные случаи — TODO (LLM)."""
-    match = _SALARY_MARKER_RE.search(text) or _SALARY_CURRENCY_RE.search(text)
-    if not match:
-        return None
-    body = match.group("body") if "body" in match.groupdict() else match.group(0)
-
-    numbers: list[int] = []
-    for token in _NUM_TOKEN_RE.findall(body):
-        value = int(re.sub(r"[\s\u00a0]", "", token))
-        if value <= 10_000_000:
-            numbers.append(value)
-    if not numbers:
-        return None
-
-    if _SALARY_UNIT_RE.search(body):
-        numbers = [n * 1000 if n < 10_000 else n for n in numbers]
-
-    minimum = numbers[0]
-    maximum = numbers[1] if len(numbers) > 1 and numbers[1] > minimum else None
-
-    currency = "RUB"
-    if "$" in body or "usd" in body.lower():
-        currency = "USD"
-    elif "€" in body or "eur" in body.lower():
-        currency = "EUR"
-
-    return Salary(
-        min_amount=minimum,
-        max_amount=maximum,
-        currency=currency,
-        period="month",
-        raw_text=match.group(0).strip(),
-    )
-
-
-def _extract_hashtags(msg: Any, text: str) -> list[str]:
-    hashtags = list(dict.fromkeys(re.findall(r"#(\w+)", text, flags=re.UNICODE)))
-    for tag in getattr(msg, "hashtags", None) or []:
-        tag = str(tag).lstrip("#")
-        if tag and tag not in hashtags:
-            hashtags.append(tag)
-    return hashtags[:20]
 
 
 # --------------------------------------------------------------------------
