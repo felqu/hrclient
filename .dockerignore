@@ -1,0 +1,9 @@
+.git
+.venv
+.env
+backend/data
+backend/logs
+backend/sessions
+__pycache__
+*.session
+*.session-journal

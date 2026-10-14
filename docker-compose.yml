@@ -26,9 +26,19 @@ services:
 #    depends_on: [postgres, redis]
 
   web:
-    build: ./frontend
-    ports: ["5173:80"]
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports: ["8501:8501"]
     env_file: .env
+    environment:
+      VACANCIES_DB_PATH: /app/backend/data/vacancies.duckdb
+      PARSE_LOG_PATH: /app/backend/logs/pipeline.log
+      TG_SESSION_NAME: /app/backend/sessions/tg_parser
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ./backend/logs:/app/backend/logs
+      - ./backend/sessions:/app/backend/sessions
 #    depends_on: [api]
 
 volumes:

@@ -10,6 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ui = ["streamlit>=1.50,<2", "pandas>=2,<3", "pyarrow>=14,<26"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
 
 [tool.ruff]

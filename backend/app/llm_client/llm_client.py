@@ -5,6 +5,7 @@ import inspect
 import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Iterable, Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -39,11 +40,12 @@ class LLMClient:
     _PROVIDERS: dict[str, dict[str, Any]] = {
         "zai": {
             "api_key_env": "Z_AI_API_KEY",
-            "base_url": None,
+            "base_url_env": None,
         },
         "nvidia": {
             "api_key_env": "NVIDIA_API_KEY",
-            "base_url": "NVIDIA_BASE_URL",
+            "base_url_env": "NVIDIA_BASE_URL",
+            "default_base_url": "https://integrate.api.nvidia.com/v1",
         },
     }
 
@@ -60,7 +62,9 @@ class LLMClient:
                 f"Доступные: {list(self._PROVIDERS)}"
             )
 
-        self.model = model
+        if not model or not model.strip():
+            raise ValueError("Не задана модель LLM. Для NVIDIA задайте NVIDIA_DEEPSEEK.")
+        self.model = model.strip()
         self.provider: Provider = provider
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -88,7 +92,14 @@ class LLMClient:
             return ZaiClient(api_key=api_key)
 
         if self.provider == "nvidia":
-            return OpenAI(base_url=cfg["base_url"], api_key=api_key)
+            base_url = (os.getenv(cfg["base_url_env"]) or cfg["default_base_url"]).strip()
+            parsed = urlsplit(base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError(
+                    "NVIDIA_BASE_URL должен быть полным HTTP(S) URL, "
+                    "например https://integrate.api.nvidia.com/v1"
+                )
+            return OpenAI(base_url=base_url, api_key=api_key)
 
         raise ValueError(self.provider)
 

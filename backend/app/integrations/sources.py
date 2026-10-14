@@ -8,7 +8,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -158,6 +158,10 @@ class HHGateway(SourceGateway):
         return []
 
 
+class ParsingCancelled(Exception):
+    """The user requested a cooperative stop between network calls."""
+
+
 class TelegramGateway(SourceGateway):
 
 
@@ -172,13 +176,15 @@ class TelegramGateway(SourceGateway):
         phone: str | None = None,
         max_per_channel: int | None = 500,
         vacancy_keywords: str = DEFAULT_VACANCY_KEYWORDS,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.chats = list(chats)
         self.max_per_channel = max_per_channel
+        self._cancel_requested = cancel_requested
         self._vacancy_re = re.compile(vacancy_keywords, re.IGNORECASE)
         self._backend = build_backend(
             backend,
-            session_name=session_name,
+            session_name=os.getenv("TG_SESSION_NAME") or session_name,
             api_id=api_id,
             api_hash=api_hash,
             phone=phone,
@@ -186,7 +192,11 @@ class TelegramGateway(SourceGateway):
         self._opened = False
         self._in_context = False
         self.last_errors: list[str] = []
-        self.llm_client = LLMClient(os.getenv("ZAI_MODEL") or "glm-4.5-flash", provider="zai")
+        self.llm_client = LLMClient(os.getenv("NVIDIA_DEEPSEEK"), provider="nvidia")
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_requested and self._cancel_requested():
+            raise ParsingCancelled()
 
 
     # --- контекстный менеджер (удобно для тестов и скриптов) ---
@@ -227,6 +237,7 @@ class TelegramGateway(SourceGateway):
                       date_from=start, date_to=end, text_filter=text,
                       max_per_channel=self.max_per_channel)
             try:
+                self._check_cancelled()
                 if self._in_context:
                     await self._open()
                     return await self._collect(start, end, text)
@@ -235,6 +246,9 @@ class TelegramGateway(SourceGateway):
                     return await self._collect(start, end, text)
                 finally:
                     await self._close()
+            except ParsingCancelled:
+                log_event("search.cancelled")
+                raise
             except Exception:
                 log_event("search.failed", level=logging.ERROR, exc_info=True)
                 raise
@@ -246,6 +260,7 @@ class TelegramGateway(SourceGateway):
         seen: set[tuple[str, str]] = set()
 
         for chat in self.chats:
+            self._check_cancelled()
             try:
                 log_event("channel.fetch.start", channel=chat)
                 messages = await self._backend.fetch(
@@ -259,24 +274,29 @@ class TelegramGateway(SourceGateway):
             log_event("channel.fetch.done", channel=chat, messages=len(messages))
             before = len(vacancies)
             for msg in messages:
+                self._check_cancelled()
                 log_event("message.received", channel=chat, message_id=getattr(msg, "id", None),
                           date=getattr(msg, "date", None), text=getattr(msg, "text", ""))
-                vacancy = await self._parse_vacancy(chat, msg, start, end)
-                if vacancy is None:
-                    continue
-                source = vacancy.source
-                key = (
-                    source.channel_name if source else str(chat),
-                    source.message_id if source else str(id(msg)),
-                )
-                if key in seen:
-                    log_event("message.skipped", channel=chat, message_id=key[1], reason="duplicate")
-                    continue
-                seen.add(key)
-                if text and text.lower() not in vacancy.raw_text.lower():
-                    log_event("message.skipped", channel=chat, message_id=key[1], reason="text_filter")
-                    continue
-                vacancies.append(vacancy)
+                try:
+                    vacancy = await self._parse_vacancy(chat, msg, start, end)
+                    if vacancy is None:
+                        continue
+                    source = vacancy.source
+                    key = (
+                        source.channel_name if source else str(chat),
+                        source.message_id if source else str(id(msg)),
+                    )
+                    if key in seen:
+                        log_event("message.skipped", channel=chat, message_id=key[1], reason="duplicate")
+                        continue
+                    seen.add(key)
+                    if text and text.lower() not in vacancy.raw_text.lower():
+                        log_event("message.skipped", channel=chat, message_id=key[1], reason="text_filter")
+                        continue
+                    vacancies.append(vacancy)
+                    log_event("vacancy.accepted", vacancy=vacancy.model_dump(mode="json"))
+                finally:
+                    log_event("message.processed", channel=chat, message_id=getattr(msg, "id", None))
             log_event("channel.done", channel=chat, vacancies=len(vacancies) - before)
 
         log_event("search.done", vacancies=len(vacancies), errors=self.last_errors)
@@ -358,14 +378,17 @@ class TelegramGateway(SourceGateway):
             return JobVacancy.model_validate_json(raw_response)
 
         except ValidationError as e:
+            self.last_errors.append(f"{channel}, сообщение {message_id}: некорректный ответ LLM")
             log_event("llm.invalid_response", level=logging.WARNING, channel=channel,
                       message_id=message_id, error=str(e))
             return None
         except json.JSONDecodeError as e:
+            self.last_errors.append(f"{channel}, сообщение {message_id}: некорректный JSON от LLM")
             log_event("llm.invalid_json", level=logging.WARNING, channel=channel,
                       message_id=message_id, error=str(e))
             return None
-        except Exception:
+        except Exception as exc:
+            self.last_errors.append(f"{channel}, сообщение {message_id}: {type(exc).__name__}: {exc}")
             log_event("llm.failed", level=logging.ERROR, exc_info=True,
                       channel=channel, message_id=message_id)
             return None

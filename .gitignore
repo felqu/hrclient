@@ -10,5 +10,8 @@ postgres_data/
 .idea
 backend/data/
 backend/logs/
+backend/sessions/
+*.session
+*.session-journal
 *.duckdb
 *.duckdb.wal
