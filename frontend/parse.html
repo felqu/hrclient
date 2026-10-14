@@ -161,10 +161,16 @@
 
       <section>
         <h2>Найденные вакансии</h2>
-        <p id="vacancies-status">Пока не запускали парсинг</p>
+        <div class="export-actions">
+          <button id="export-button" type="button">Экспорт в XLSX</button>
+          <span id="export-status" role="status">Все сохранённые вакансии</span>
+        </div>
+        <p id="vacancies-status">Загрузка сохранённых вакансий…</p>
         <div id="vacancies" class="vacancies"></div>
       </section>
     </main>
-    <script src="parse.js"></script>
+    <script src="api.js?v=2"></script>
+    <script src="parse.js?v=2"></script>
+    <script src="export.js?v=2"></script>
   </body>
 </html>

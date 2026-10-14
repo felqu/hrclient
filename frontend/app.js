@@ -1,4 +1,4 @@
-const API_URL = window.HR_CLIENT_API_URL || "http://localhost:8000/api/v1";
+const API_URL = window.HRClientApi.url;
 
 const byId = (id) => document.getElementById(id);
 const today = new Date();
@@ -34,7 +34,7 @@ function renderVacancies(vacancies) {
     status.textContent = "Пока нет импортированных вакансий. Задайте диапазон дат и запустите импорт.";
     return;
   }
-  status.textContent = "";
+  status.textContent = `Всего сохранено вакансий: ${vacancies.length}`;
   vacancies.forEach((vacancy) => {
     const card = document.createElement("article");
     const source = document.createElement("span");

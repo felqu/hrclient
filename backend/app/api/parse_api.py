@@ -7,8 +7,10 @@
     GET  /api/v1/health             — проверка доступности
     POST /api/v1/parse              — запуск парсинга, возвращает найденные вакансии
     POST /api/v1/vacancies/import   — то же, но в формате старого дашборда (frontend/index.html)
-    GET  /api/v1/vacancies          — результаты последнего запуска в формате дашборда
-    GET  /api/v1/analytics/dashboard — метрики (заглушка, БД нет)
+    GET  /api/v1/vacancies          — сохранённые вакансии в формате дашборда
+    GET  /api/v1/vacancies/parsed   — сохранённые вакансии в полном формате
+    GET  /api/v1/vacancies/export.xlsx — выгрузка всех сохранённых вакансий
+    GET  /api/v1/analytics/dashboard — метрики откликов (заглушка)
 
 Статический фронтенд (frontend/) монтируется на "/", поэтому страница
 парсинга доступна по адресу http://localhost:8000/parse.html (same-origin,
@@ -16,6 +18,8 @@ CORS не нужен; CORS открыт для запуска страницы �
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import time as stdlib_time
 import uuid
@@ -25,11 +29,15 @@ from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.integrations.models.tg_models import JobVacancy
 from app.integrations.sources import TelegramGateway
+from app.pipeline_log import log_event, pipeline_run
+from app.services.vacancy_export import vacancies_xlsx
+from app.services.vacancy_store import VacancyStore, vacancy_id
 
 BackendName = Literal["tg_parser", "private_tg_parser"]
 
@@ -88,7 +96,6 @@ class DashboardMetrics(BaseModel):
     rejected: int = 0
 
 
-_last_result: ParseResponse | None = None
 _last_chats: list[str] = []
 
 
@@ -114,34 +121,37 @@ async def _run_parse(
     text: str | None,
     max_per_channel: int | None,
 ) -> ParseResponse:
-    global _last_result, _last_chats
+    global _last_chats
 
-    now = datetime.now(timezone.utc)
-    gateway = TelegramGateway(
-        chats=chats,
-        backend=backend,
-        max_per_channel=max_per_channel or 500,
-    )
-    started = stdlib_time.perf_counter()
-    try:
-        vacancies = await gateway.search(
-            date_from=_to_dt(date_from, now - timedelta(days=7)),
-            date_to=_to_dt(date_to, now),
-            text=text or None,
+    with pipeline_run():
+        now = datetime.now(timezone.utc)
+        started = stdlib_time.perf_counter()
+        log_event("parse.start", chats=chats, backend=backend, date_from=date_from,
+                  date_to=date_to, text_filter=text, max_per_channel=max_per_channel or 500)
+        try:
+            gateway = TelegramGateway(
+                chats=chats, backend=backend, max_per_channel=max_per_channel or 500,
+            )
+            vacancies = await gateway.search(
+                date_from=_to_dt(date_from, now - timedelta(days=7)),
+                date_to=_to_dt(date_to, now), text=text or None,
+            )
+        except Exception as exc:
+            log_event("parse.failed", level=logging.ERROR, exc_info=True)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        try:
+            await asyncio.to_thread(VacancyStore().save, vacancies)
+        except Exception as exc:
+            log_event("parse.save_failed", level=logging.ERROR, exc_info=True)
+            raise HTTPException(status_code=500, detail="Не удалось сохранить вакансии в DuckDB") from exc
+        result = ParseResponse(
+            count=len(vacancies),
+            duration_ms=round((stdlib_time.perf_counter() - started) * 1000),
+            chats=chats, vacancies=vacancies, errors=list(gateway.last_errors),
         )
-    except Exception as exc:  # noqa: BLE001 — транслируем ошибку парсера клиенту страницы
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    result = ParseResponse(
-        count=len(vacancies),
-        duration_ms=round((stdlib_time.perf_counter() - started) * 1000),
-        chats=chats,
-        vacancies=vacancies,
-        errors=list(gateway.last_errors),
-    )
-    if not (result.count == 0 and result.errors):
-        _last_result = result
-    _last_chats = list(chats)
-    return result
+        _last_chats = list(chats)
+        log_event("parse.done", count=result.count, duration_ms=result.duration_ms, errors=result.errors)
+        return result
 
 
 def _resolve_import_chats(body: ImportRequest) -> list[str]:
@@ -165,9 +175,8 @@ def _vacancy_to_read(vacancy: JobVacancy) -> VacancyRead:
         url = str(source.channel_url)
     else:
         url = "#"
-    dedup = f"{channel or 'telegram'}:{source.message_id if source else ''}:{vacancy.title}:{vacancy.raw_text[:64]}"
     return VacancyRead(
-        id=uuid.uuid5(uuid.NAMESPACE_URL, dedup),
+        id=vacancy_id(vacancy),
         source=channel or "telegram",
         title=vacancy.title,
         company=vacancy.company.name if vacancy.company else None,
@@ -232,9 +241,32 @@ async def import_vacancies(body: ImportRequest) -> dict:
 
 @router.get("/vacancies", response_model=list[VacancyRead])
 async def list_vacancies() -> list[VacancyRead]:
-    if _last_result is None:
-        return []
-    return [_vacancy_to_read(v) for v in _last_result.vacancies]
+    vacancies = await asyncio.to_thread(VacancyStore().list)
+    return [_vacancy_to_read(v) for v in vacancies]
+
+
+@router.get("/vacancies/parsed", response_model=list[JobVacancy])
+async def list_parsed_vacancies() -> list[JobVacancy]:
+    return await asyncio.to_thread(VacancyStore().list)
+
+
+@router.get("/vacancies/export.xlsx")
+def export_vacancies_xlsx() -> Response:
+    with pipeline_run():
+        log_event("export.start")
+        try:
+            vacancies = VacancyStore().list()
+            content = vacancies_xlsx(vacancies)
+        except Exception as exc:
+            log_event("export.failed", level=logging.ERROR, exc_info=True)
+            raise HTTPException(status_code=500, detail="Не удалось создать XLSX. Подробности в pipeline.log") from exc
+        filename = f"vacancies-{datetime.now(timezone.utc):%Y-%m-%d}.xlsx"
+        log_event("export.done", count=len(vacancies), bytes=len(content), filename=filename)
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
 
 @router.get("/analytics/dashboard", response_model=DashboardMetrics)
@@ -248,6 +280,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 app.include_router(router)
 if FRONTEND_DIR.is_dir():

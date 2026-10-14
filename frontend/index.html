@@ -32,15 +32,21 @@
 
       <section>
         <h2>Вакансии</h2>
+        <div class="export-actions">
+          <button id="export-button" type="button">Экспорт в XLSX</button>
+          <span id="export-status" role="status">Все сохранённые вакансии</span>
+        </div>
         <p id="vacancies-status">Загрузка…</p>
         <div id="vacancies" class="vacancies"></div>
       </section>
 
       <section class="todo">
         <h2>Следующие экраны</h2>
-        <p>Резюме · Профили матчинга · Черновики откликов с approve/send · Воронка и экспорт CSV/XLSX.</p>
+        <p>Резюме · Профили матчинга · Черновики откликов с approve/send · Воронка.</p>
       </section>
     </main>
-    <script src="app.js"></script>
+    <script src="api.js?v=2"></script>
+    <script src="app.js?v=2"></script>
+    <script src="export.js?v=2"></script>
   </body>
 </html>

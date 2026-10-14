@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -12,6 +13,7 @@ from typing import Any, Literal, Protocol
 from dotenv import load_dotenv
 from pydantic import ValidationError
 from ..llm_client.llm_client import LLMClient
+from app.pipeline_log import log_event, pipeline_run
 
 from .models.tg_models import (
     JobVacancy,
@@ -199,6 +201,7 @@ class TelegramGateway(SourceGateway):
 
     async def _open(self) -> None:
         if not self._opened:
+            log_event("telegram.connect", backend=self._backend.name)
             await self._backend.open()
             self._opened = True
 
@@ -206,6 +209,7 @@ class TelegramGateway(SourceGateway):
         if self._opened:
             self._opened = False
             await self._backend.close()
+            log_event("telegram.disconnect", backend=self._backend.name)
 
     # --- основной метод, требуемый SourceGateway ---
     async def search(
@@ -217,15 +221,23 @@ class TelegramGateway(SourceGateway):
     ) -> list[JobVacancy]:
         """Возвращает вакансии из self.chats за [date_from, date_to] (дедупликация включена)."""
         start, end = _normalize_range(date_from, date_to)
-        if self._in_context:
-            await self._open()
-            return await self._collect(start, end, text)
-
-        await self._open()
-        try:
-            return await self._collect(start, end, text)
-        finally:
-            await self._close()
+        self.last_errors.clear()
+        with pipeline_run():
+            log_event("search.start", chats=self.chats, backend=self._backend.name,
+                      date_from=start, date_to=end, text_filter=text,
+                      max_per_channel=self.max_per_channel)
+            try:
+                if self._in_context:
+                    await self._open()
+                    return await self._collect(start, end, text)
+                await self._open()
+                try:
+                    return await self._collect(start, end, text)
+                finally:
+                    await self._close()
+            except Exception:
+                log_event("search.failed", level=logging.ERROR, exc_info=True)
+                raise
 
     async def _collect(
         self, start: datetime, end: datetime, text: str | None
@@ -235,15 +247,20 @@ class TelegramGateway(SourceGateway):
 
         for chat in self.chats:
             try:
+                log_event("channel.fetch.start", channel=chat)
                 messages = await self._backend.fetch(
                     chat, start, end, self.max_per_channel
                 )
             except Exception as exc:  # noqa: BLE001 — сбой одного канала не должен ронять импорт
-                print(f"   Ошибка при обработке {chat}: {exc}")
+                log_event("channel.fetch.failed", level=logging.ERROR, exc_info=True, channel=chat)
                 self.last_errors.append(f"{chat}: {exc}")
                 continue
 
+            log_event("channel.fetch.done", channel=chat, messages=len(messages))
+            before = len(vacancies)
             for msg in messages:
+                log_event("message.received", channel=chat, message_id=getattr(msg, "id", None),
+                          date=getattr(msg, "date", None), text=getattr(msg, "text", ""))
                 vacancy = await self._parse_vacancy(chat, msg, start, end)
                 if vacancy is None:
                     continue
@@ -253,35 +270,43 @@ class TelegramGateway(SourceGateway):
                     source.message_id if source else str(id(msg)),
                 )
                 if key in seen:
+                    log_event("message.skipped", channel=chat, message_id=key[1], reason="duplicate")
                     continue
                 seen.add(key)
                 if text and text.lower() not in vacancy.raw_text.lower():
+                    log_event("message.skipped", channel=chat, message_id=key[1], reason="text_filter")
                     continue
                 vacancies.append(vacancy)
+            log_event("channel.done", channel=chat, vacancies=len(vacancies) - before)
 
+        log_event("search.done", vacancies=len(vacancies), errors=self.last_errors)
         return vacancies
 
     async def _parse_vacancy(
             self, channel: str, msg: Any, start: datetime, end: datetime
     ) -> JobVacancy | None:
         text = (getattr(msg, "text", "") or "").strip()
+        message_id = getattr(msg, "id", None)
         if not text:
+            log_event("message.skipped", channel=channel, message_id=message_id, reason="empty_text")
             return None
 
         # Дешевая проверка регуляркой, чтобы не слать мусор в LLM и экономить токены
         if not self._vacancy_re.search(text):
+            log_event("message.skipped", channel=channel, message_id=message_id, reason="no_keywords")
             return None
 
         posted = _to_utc(getattr(msg, "date", None))
         start = _to_utc(start)
         end = _to_utc(end)
         if posted is None or (start and posted < start) or (end and posted > end):
+            log_event("message.skipped", channel=channel, message_id=message_id, reason="date_range")
             return None
 
         # --- Вызов LLM для извлечения сущностей ---
-        llm_data = await self._extract_vacancy_with_llm(text)
+        llm_data = await self._extract_vacancy_with_llm(text, channel=channel, message_id=message_id)
         if llm_data is None:
-            #logger.warning(f"LLM не смог распарсить вакансию в канале {channel}, msg_id={getattr(msg, 'id', None)}")
+            log_event("message.skipped", channel=channel, message_id=message_id, reason="llm_failed")
             return None
 
         msg_id = getattr(msg, "id", None)
@@ -296,11 +321,15 @@ class TelegramGateway(SourceGateway):
         llm_data.raw_text = text
         if llm_data.published_date is None and posted is not None:
             llm_data.published_date = posted.date()
+        log_event("vacancy.parsed", channel=channel, message_id=message_id,
+                  vacancy=llm_data.model_dump(mode="json"))
         return llm_data
 
     # ------------------- LLM интеграция -------------------
 
-    async def _extract_vacancy_with_llm(self, text: str) -> JobVacancy | None:
+    async def _extract_vacancy_with_llm(
+        self, text: str, *, channel: str | None = None, message_id: Any = None,
+    ) -> JobVacancy | None:
         """Отправляет текст в LLM и парсит ответ в Pydantic модель."""
 
         schema = JobVacancy.model_json_schema()
@@ -319,19 +348,26 @@ class TelegramGateway(SourceGateway):
             truncated_text = text[:8000]
             messages[1]["content"] = f"Текст вакансии:\n{truncated_text}"
 
+            log_event("llm.request", channel=channel, message_id=message_id,
+                      model=self.llm_client.model, text=truncated_text,
+                      original_length=len(text), truncated=len(text) > len(truncated_text))
             raw_response = await self.llm_client.complete(messages, extra=extra)
+            log_event("llm.response", channel=channel, message_id=message_id, response=raw_response)
 
             # Валидация через Pydantic
             return JobVacancy.model_validate_json(raw_response)
 
         except ValidationError as e:
-            #logger.error(f"Pydantic validation error for LLM response: {e}")
+            log_event("llm.invalid_response", level=logging.WARNING, channel=channel,
+                      message_id=message_id, error=str(e))
             return None
-        except json.JSONDecodeError:
-            #logger.error("LLM returned invalid JSON")
+        except json.JSONDecodeError as e:
+            log_event("llm.invalid_json", level=logging.WARNING, channel=channel,
+                      message_id=message_id, error=str(e))
             return None
-        except Exception as e:
-            #logger.exception(f"Unexpected error during LLM extraction: {e}")
+        except Exception:
+            log_event("llm.failed", level=logging.ERROR, exc_info=True,
+                      channel=channel, message_id=message_id)
             return None
 
 

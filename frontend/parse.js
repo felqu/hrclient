@@ -1,4 +1,4 @@
-const API_URL = window.HR_CLIENT_API_URL || "http://localhost:8000/api/v1";
+const API_URL = window.HRClientApi.url;
 
 const byId = (id) => document.getElementById(id);
 const today = new Date();
@@ -40,10 +40,10 @@ function renderVacancies(vacancies) {
   const status = byId("vacancies-status");
   container.replaceChildren();
   if (!vacancies.length) {
-    status.textContent = "Ничего не найдено. Попробуйте другие каналы или более широкий диапазон дат.";
+    status.textContent = "Сохранённых вакансий пока нет. Запустите парсинг.";
     return;
   }
-  status.textContent = "";
+  status.textContent = `Всего сохранено вакансий: ${vacancies.length}`;
 
   vacancies.forEach((vacancy) => {
     const card = document.createElement("article");
@@ -115,11 +115,16 @@ function renderVacancies(vacancies) {
   });
 }
 
+async function loadSavedVacancies() {
+  const response = await fetch(`${API_URL}/vacancies/parsed`);
+  if (!response.ok) throw new Error(`Не удалось загрузить сохранённые вакансии: HTTP ${response.status}`);
+  renderVacancies(await response.json());
+}
+
 byId("parse-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = byId("run-button");
   const status = byId("parse-status");
-  const vacanciesStatus = byId("vacancies-status");
 
   const chats = byId("chats")
     .value.split(/[\n,;]+/)
@@ -131,8 +136,6 @@ byId("parse-form").addEventListener("submit", async (event) => {
   }
 
   button.disabled = true;
-  byId("vacancies").replaceChildren();
-  vacanciesStatus.textContent = "";
   setStatus(status, "Идёт парсинг…", false, true);
 
   try {
@@ -156,11 +159,10 @@ byId("parse-form").addEventListener("submit", async (event) => {
     }
     const errors = Array.isArray(data.errors) ? data.errors : [];
     if (errors.length && !data.count) {
-      vacanciesStatus.textContent = `Не удалось получить данные: ${errors.join("; ")}`;
-      setStatus(status, "Парсинг завершился с ошибками", true, false);
+      setStatus(status, `Не удалось получить данные: ${errors.join("; ")}`, true, false);
       return;
     }
-    renderVacancies(data.vacancies);
+    await loadSavedVacancies();
     if (errors.length) {
       setStatus(
         status,
@@ -178,8 +180,9 @@ byId("parse-form").addEventListener("submit", async (event) => {
     );
   } catch (error) {
     showError(status, error);
-    vacanciesStatus.textContent = "Парсинг не завершился — результаты недоступны.";
   } finally {
     button.disabled = false;
   }
 });
+
+loadSavedVacancies().catch((error) => showError(byId("vacancies-status"), error));
