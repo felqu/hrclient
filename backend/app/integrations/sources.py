@@ -192,7 +192,7 @@ class TelegramGateway(SourceGateway):
         self._opened = False
         self._in_context = False
         self.last_errors: list[str] = []
-        self.llm_client = LLMClient(os.getenv("NVIDIA_DEEPSEEK"), provider="nvidia")
+        self.llm_client = LLMClient(os.getenv("LOCAL_MODEL"), provider="local")
 
     def _check_cancelled(self) -> None:
         if self._cancel_requested and self._cancel_requested():
