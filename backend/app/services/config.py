@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    llm_provider: Literal["zai", "nvidia"] = "zai"
+    llm_provider: Literal["zai", "nvidia", "local"] = "zai"
     llm_model: str | None = None
     llm_max_tokens: int = 2048
     llm_temperature: float = 0.6

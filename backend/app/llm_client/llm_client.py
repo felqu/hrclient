@@ -13,7 +13,7 @@ from zai import ZaiClient
 load_dotenv()
 
 
-Provider = Literal["zai", "nvidia"]
+Provider = Literal["zai", "nvidia", "local"]
 Message = dict[str, str]
 
 
@@ -47,6 +47,10 @@ class LLMClient:
             "base_url_env": "NVIDIA_BASE_URL",
             "default_base_url": "https://integrate.api.nvidia.com/v1",
         },
+        "local": {
+            "api_key_env": None,
+            "base_url_env": "LLAMA_BASE_URL",
+        },
     }
 
     def __init__(
@@ -63,7 +67,7 @@ class LLMClient:
             )
 
         if not model or not model.strip():
-            raise ValueError("Не задана модель LLM. Для NVIDIA задайте NVIDIA_DEEPSEEK.")
+            raise ValueError("Не задана модель LLM. Передайте её имя в параметре model.")
         self.model = model.strip()
         self.provider: Provider = provider
         self.max_tokens = max_tokens
@@ -75,7 +79,8 @@ class LLMClient:
 
     def _build_client(self):
         cfg = self._PROVIDERS[self.provider]
-        api_key = os.getenv(cfg["api_key_env"])
+        # Локальный сервер без авторизации; SDK требует непустую заглушку ключа.
+        api_key = "local" if self.provider == "local" else os.getenv(cfg["api_key_env"])
         if not api_key:
             raise RuntimeError(
                 f"Не задан env-ключ {cfg['api_key_env']} для провайдера {self.provider}"
@@ -91,13 +96,12 @@ class LLMClient:
             # fallback: синхронный клиент, будем крутить в отдельном потоке
             return ZaiClient(api_key=api_key)
 
-        if self.provider == "nvidia":
-            base_url = (os.getenv(cfg["base_url_env"]) or cfg["default_base_url"]).strip()
+        if self.provider in {"nvidia", "local"}:
+            base_url = (os.getenv(cfg["base_url_env"]) or cfg.get("default_base_url", "")).strip()
             parsed = urlsplit(base_url)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
                 raise ValueError(
-                    "NVIDIA_BASE_URL должен быть полным HTTP(S) URL, "
-                    "например https://integrate.api.nvidia.com/v1"
+                    f"{cfg['base_url_env']} должен быть полным HTTP(S) URL, "
                 )
             return OpenAI(base_url=base_url, api_key=api_key)
 
@@ -197,3 +201,12 @@ class LLMClient:
             content=getattr(delta, "content", None) or "",
             reasoning=getattr(delta, "reasoning_content", None) or "",
         )
+if __name__ == "__main__":
+    messages = [
+        {"role": "system", "content": "Ты грубый и недовольный помочник "},
+
+        {"role": "user", "content": f"Привет как твой дела"}
+    ]
+    llm = LLMClient(os.getenv("LOCAL_MODEL"), provider="local")
+    raw = asyncio.run(llm.complete(messages))
+    print(raw)
